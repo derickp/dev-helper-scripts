@@ -10,6 +10,16 @@ import subprocess
 import sys
 import urllib2
 import warnings
+import getopt
+import re
+
+try:
+    opts, args = getopt.getopt(sys.argv[1:], "ho:v", ["help", "output="])
+except getopt.GetoptError as err:
+    # print help information and exit:
+    print str(err) # will print something like "option -a not recognized"
+    usage()
+    sys.exit(2)
 
 # check if running from a module folder
 if not os.path.exists("../../../parts"):
@@ -50,28 +60,167 @@ odoo = odoorpc.ODOO('sunflower.1systeem.nl',
     protocol='jsonrpc+ssl', port=443, opener=opener)
 odoo.login('odoo_sunflower', username, password)
 
-# list higher priority issues belonging to us,
-# and to the current project
-if 'project.issue' in odoo.env:
-    issue_obj = odoo.env['project.issue']
-    issue_domain = [
-            ('stage_id.name', 'in', [
-                'Ready for dev',
-                'Development',
-                'Code Review'
-            ]),
-            ('user_id.id', '=', odoo.env.uid),
-            ('priority', '>=', 2)
-        ]
-    if restrict_projects:
-        issue_domain.append(('project_id.name', 'in', 
-                restrict_projects))
-    issue_ids = issue_obj.search(issue_domain,
-            order='stage_id asc')
-issues = issue_obj.browse(issue_ids)
-for issue in issues:
-    print issue.stage_id.name + " : " + str(issue.id) + " : " + issue.name
+HELP = "\nList of ISSUE command and arguments \n\n"
+HELP += "-- issue list :  List all issues belonging to you \n" 
+HELP += "-- issue <num>:  Switches to the branch, fetches, creates or checks name \n" 
 
+STAGES = ['Ready for dev','Development', 'Code Review']
+
+def check_if_issue_exists(issue_number):
+    if 'project.issue' in odoo.env:
+        issue_obj = odoo.env['project.issue']
+        issue_domain = [
+                ('user_id.id', '=', odoo.env.uid),
+                ('id', '=', issue_number)
+            ]
+        if restrict_projects:
+            issue_domain.append(('project_id.name', 'in', 
+                    restrict_projects))
+        issue_id = issue_obj.search(issue_domain)
+    if not issue_id:
+        print "Issue of ID {} not found or assigned to different user".format(issue_number)
+        return False
+    else:
+        issue = issue_obj.browse(issue_id)
+        print "Issue {} exists...".format(issue_number)
+        return issue
+
+def issue_list():
+    # list higher priority issues belonging to us,
+    # and to the current project
+    if 'project.issue' in odoo.env:
+        issue_obj = odoo.env['project.issue']
+        issue_domain = [
+                ('stage_id.name', 'in', [
+                    'Ready for dev',
+                    'Development',
+                    'Code Review'
+                ]),
+                ('user_id.id', '=', odoo.env.uid),
+                ('priority', '>=', 2)
+            ]
+        if restrict_projects:
+            issue_domain.append(('project_id.name', 'in', 
+                    restrict_projects))
+        issue_ids = issue_obj.search(issue_domain,
+                order='stage_id asc')
+    issues = issue_obj.browse(issue_ids)
+    return issues
+
+def set_git_for_issue(issue):  
+    required_branch = "8.0-"+str(issue.id)+"-"+issue.name.replace(" ", "-")
+    current_branch = subprocess.check_output('git rev-parse --abbrev-ref HEAD', shell=True).strip()
+    git_branches = subprocess.check_output('git branch -a', shell=True).strip()
+
+    #git pull if current branch = required branch
+    if current_branch == required_branch:
+        process = subprocess.Popen(["git", "pull"], stdout=subprocess.PIPE)
+        output = process.communicate()[0] 
+        print output 
+
+    #check if required branch is in git_branches and checkout to it
+    if required_branch in git_branches:
+        #required branch is in local branches
+        subprocess.check_output('git checkout '+required_branch, shell=True).strip()
+        print "git checkouted out to required branch from local branches"
+
+    if 'remotes/origin'+required_branch in git_branches:
+        #required branch is in remote branches
+        subprocess.check_output('git checkout '+required_branch, shell=True).strip()
+        print "git checkouted out to required branch from remote branches"
+
+    if required_branch not in git_branches and 'remotes/origin'+required_branch not in git_branches:
+        #required branch is not in git branches, create a new branch 
+        subprocess.check_output('git checkout -b '+required_branch+' origin/'+required_branch, shell=True).strip()
+        print "git created new branch"
+
+    print "Issue is ready for developement"
+
+def update_issue_stage(issue, stage_name):
+    stage_obj = odoo.env['project.task.type']
+    stage_id = stage_obj.search([('name', '=', stage_name)])
+    stage = stage_obj.browse(stage_id)
+    issue.stage_id = stage[0].id
+    print "Stage of Issue {} has been changed to {}".format(issue.id, stage_name)
+
+def has_pylint_errors(issue):
+    changed_files = subprocess.check_output('git diff --name-only', shell=True).strip()
+    if changed_files:
+        files = changed_files.splitlines()
+        error_count = 0
+        for file in files:
+            file_path = '../'+file
+            sys.path.append("../../odoo")
+            print "\nCHECKING: {}. \n".format(file_path)
+            script = "pylint --rcfile=../../../.pylint.cfg --load-plugins=pylint_odoo {}".format(file_path)
+            p = subprocess.Popen(script, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if p.stdout.readlines()
+                for line in p.stdout.readlines():
+                    print line, "\n"
+                    error_count = error_count + 1
+            else:
+                print "Pylint status of this file is OK"
+        if error_count != 0:
+            return True
+    else:
+        print "No files have changed on this issue"
+
+
+#START APP
+#command: issue 
+if not args:
+    print HELP
+
+#command: issue help or issue h
+if args[0] == 'help' or args[0] == 'h':
+    print HELP
+
+#command: issue list
+elif args[0] == 'list':
+    issues = issue_list()
+    if issues:
+        for issue in issues:
+            print issue.stage_id.name + " : " + str(issue.id) + " : " + issue.name
+    else:
+        print "You currently have no issues..."
+
+#command: issue 123
+elif args[0].isdigit() and not args[1]:
+    issue = check_if_issue_exists(args[0])
+    if issue:
+        print issue.stage_id.name + " : " + str(issue.id) + " : " + issue.name
+
+#command: issue start 123
+elif args[0] == 'start' and args[1].isdigit():
+    issue_number = args[1]
+    print "Checking if issue {} exists...".format(issue_number)
+    issue = check_if_issue_exists(issue_number)
+    if issue:
+        print "Issue is being started..."
+        set_git_for_issue(issue)
+        #change issue stage to development
+        update_issue_stage(issue, 'Development')
+
+
+#command: issue 123 stage Development
+elif args[0].isdigit() and args[1] == 'stage':
+    issue = check_if_issue_exists(args[0])
+    if issue:
+        if len(args) == 3:
+            stage_name = args[2]
+            if stage_name in STAGES:
+                update_issue_stage(issue, stage_name)
+            else:
+                print "Stage of Name {} not found".format(stage_name)
+        else: 
+            print "issue stage command requires third arg, the stage name."
+
+#command: issue 123 qa
+elif args[0].isdigit() and args[1] == 'qa':
+    issue = check_if_issue_exists(args[0])
+    if issue:
+        has_pylint_errors(issue)
+        
 #print(user.name)            # name of the user connected
 #print(user.company_id.name) # the name of its company
 
