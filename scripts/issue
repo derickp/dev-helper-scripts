@@ -14,13 +14,11 @@ import getopt
 import re
 import argparse
 import requests
-import responses
 
 import json
 
 # TOGGL API
 #pip install togglwrapper
-# pip install responses
 # iso8601 module
 # pytz module
 # requests
